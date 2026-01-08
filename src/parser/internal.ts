@@ -1,8 +1,8 @@
 import * as md from '../markdown';
 import * as notion from '../notion';
 import path from 'path';
-import {URL} from 'url';
-import {isSupportedCodeLang, LIMITS} from '../notion';
+import { URL } from 'url';
+import { isSupportedCodeLang, LIMITS } from '../notion';
 
 function ensureLength(text: string, copy?: object) {
   const chunks = text.match(/[^]{1,2000}/g) || [];
@@ -54,7 +54,7 @@ function parseInline(
       return [notion.richText(element.value, copy)];
 
     case 'inlineMath':
-      return [notion.richText(element.value, {...copy, type: 'equation'})];
+      return [notion.richText(element.value, { ...copy, type: 'equation' })];
 
     default:
       return [];
@@ -214,7 +214,7 @@ function parseBlockquote(
         const richText = paragraph.children.flatMap(child =>
           child === firstTextNode
             ? textWithoutEmoji
-              ? parseInline({type: 'text', value: textWithoutEmoji})
+              ? parseInline({ type: 'text', value: textWithoutEmoji })
               : []
             : parseInline(child),
         );
@@ -229,8 +229,24 @@ function parseBlockquote(
     }
   }
 
+  // Parse all children as blocks
   const children = element.children.flatMap(child => parseNode(child, options));
-  return notion.blockquote([], children);
+
+  // Fix Issue #70: Extract rich_text from first paragraph child to avoid "Empty quote"
+  // If the first child is a paragraph, use its rich_text content for the blockquote
+  // and move remaining children to the blockquote's children array
+  if (children.length > 0 && children[0].type === 'paragraph') {
+    const firstParagraph = children[0] as notion.Block & {
+      paragraph: { rich_text: notion.RichText[] };
+    };
+    const richText = firstParagraph.paragraph.rich_text;
+    const remainingChildren = children.slice(1);
+    return notion.blockquote(richText, remainingChildren);
+  }
+
+  // Fallback: if no paragraph children, create a quote with placeholder text
+  // to avoid Notion API rejecting empty rich_text arrays
+  return notion.blockquote([notion.richText('')], children);
 }
 
 function parseHeading(element: md.Heading): notion.Block {
@@ -283,8 +299,19 @@ function parseTableCell(node: md.TableCell): notion.RichText[] {
   return node.children.flatMap(child => parseInline(child));
 }
 
-function parseTableRow(node: md.TableRow): notion.TableRowBlock {
+/**
+ * Parse a table row, padding with empty cells if needed to match table width.
+ * Fixes Issue #71: Tables with fewer cells in subsequent rows.
+ */
+function parseTableRow(
+  node: md.TableRow,
+  expectedWidth: number,
+): notion.TableRowBlock {
   const cells = node.children.map(child => parseTableCell(child));
+  // Pad with empty cells if this row has fewer cells than the table width
+  while (cells.length < expectedWidth) {
+    cells.push([notion.richText('')]);
+  }
   return notion.tableRow(cells);
 }
 
@@ -294,7 +321,7 @@ function parseTable(node: md.Table): notion.Block[] {
     ? node.children[0].children.length
     : 0;
 
-  const tableRows = node.children.map(child => parseTableRow(child));
+  const tableRows = node.children.map(child => parseTableRow(child, tableWidth));
   return [notion.table(tableRows, tableWidth)];
 }
 
@@ -359,7 +386,52 @@ export interface CommonOptions {
 export interface BlocksOptions extends CommonOptions {
   /** Whether to render invalid images as text */
   strictImageUrls?: boolean;
+  /** Whether to convert blockquotes starting with emoji to callouts */
   enableEmojiCallouts?: boolean;
+  /**
+   * Enable LaTeX math parsing (default: false).
+   * When false, dollar signs like $100 will be treated as plain text.
+   * When true, $...$ will be parsed as inline math and $$...$$ as block math.
+   */
+  enableMath?: boolean;
+}
+
+/**
+ * Split blocks that have rich_text arrays exceeding Notion's 100-item limit.
+ * Fixes Issue #51: Notion rich_text[] max length is 100.
+ */
+function splitLargeRichTextArrays(
+  blocks: notion.Block[],
+  limitCallback: (err: Error) => void,
+): notion.Block[] {
+  const MAX_RICH_TEXT = LIMITS.RICH_TEXT_ARRAYS;
+
+  return blocks.flatMap(block => {
+    // Handle paragraph blocks
+    if (
+      block.type === 'paragraph' &&
+      'paragraph' in block &&
+      block.paragraph.rich_text.length > MAX_RICH_TEXT
+    ) {
+      limitCallback(
+        new Error(
+          `Paragraph rich_text array exceeds Notion limit (${MAX_RICH_TEXT}), splitting into multiple blocks`,
+        ),
+      );
+      const chunks: notion.Block[] = [];
+      for (
+        let i = 0;
+        i < block.paragraph.rich_text.length;
+        i += MAX_RICH_TEXT
+      ) {
+        chunks.push(
+          notion.paragraph(block.paragraph.rich_text.slice(i, i + MAX_RICH_TEXT)),
+        );
+      }
+      return chunks;
+    }
+    return [block];
+  });
 }
 
 export function parseBlocks(
@@ -369,16 +441,19 @@ export function parseBlocks(
   const parsed = root.children.flatMap(item => parseNode(item, options || {}));
 
   const truncate = !!(options?.notionLimits?.truncate ?? true),
-    limitCallback = options?.notionLimits?.onError ?? (() => {});
+    limitCallback = options?.notionLimits?.onError ?? (() => { });
 
-  if (parsed.length > LIMITS.PAYLOAD_BLOCKS)
+  // Fix Issue #51: Split blocks with rich_text arrays exceeding 100 items
+  const splitBlocks = splitLargeRichTextArrays(parsed, limitCallback);
+
+  if (splitBlocks.length > LIMITS.PAYLOAD_BLOCKS)
     limitCallback(
       new Error(
         `Resulting blocks array exceeds Notion limit (${LIMITS.PAYLOAD_BLOCKS})`,
       ),
     );
 
-  return truncate ? parsed.slice(0, LIMITS.PAYLOAD_BLOCKS) : parsed;
+  return truncate ? splitBlocks.slice(0, LIMITS.PAYLOAD_BLOCKS) : splitBlocks;
 }
 
 export interface RichTextOptions extends CommonOptions {
@@ -404,7 +479,7 @@ export function parseRichText(
   });
 
   const truncate = !!(options?.notionLimits?.truncate ?? true),
-    limitCallback = options?.notionLimits?.onError ?? (() => {});
+    limitCallback = options?.notionLimits?.onError ?? (() => { });
 
   if (richTexts.length > LIMITS.RICH_TEXT_ARRAYS)
     limitCallback(

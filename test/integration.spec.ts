@@ -1,8 +1,8 @@
-import {markdownToBlocks, markdownToRichText} from '../src';
+import { markdownToBlocks, markdownToRichText } from '../src';
 import * as notion from '../src/notion';
 import fs from 'fs';
-import {LIMITS} from '../src/notion';
-import {vi} from 'vitest';
+import { LIMITS } from '../src/notion';
+import { vi } from 'vitest';
 
 describe('markdown converter', () => {
   describe('markdownToBlocks', () => {
@@ -18,7 +18,7 @@ hello _world_
       const expected = [
         notion.paragraph([
           notion.richText('hello '),
-          notion.richText('world', {annotations: {italic: true}}),
+          notion.richText('world', { annotations: { italic: true } }),
         ]),
         notion.divider(),
         notion.headingTwo([notion.richText('heading2')]),
@@ -86,7 +86,8 @@ const hello = "hello";
       const expected = [
         notion.headingOne([notion.richText('Images')]),
         notion.paragraph([notion.richText('This is a paragraph!')]),
-        notion.blockquote([], [notion.paragraph([notion.richText('Quote')])]),
+        // Fix Issue #70: Blockquote now extracts first paragraph content
+        notion.blockquote([notion.richText('Quote')], []),
         notion.paragraph([notion.richText('Paragraph')]),
         notion.image('https://url.com/image.jpg'),
         notion.table_of_contents(),
@@ -117,7 +118,7 @@ const hello = "hello";
       const textArray =
         actual[1].type === 'paragraph'
           ? actual[1].paragraph.rich_text
-          : {length: -1};
+          : { length: -1 };
 
       expect(textArray.length).toStrictEqual(9);
     });
@@ -168,7 +169,7 @@ const hello = "hello";
 
     it('should convert markdown to blocks - deal with images - strict mode', () => {
       const text = fs.readFileSync('test/fixtures/images.md').toString();
-      const actual = markdownToBlocks(text, {strictImageUrls: true});
+      const actual = markdownToBlocks(text, { strictImageUrls: true });
 
       const expected = [
         notion.headingOne([notion.richText('Images')]),
@@ -186,7 +187,7 @@ const hello = "hello";
 
     it('should convert markdown to blocks - deal with images - not strict mode', () => {
       const text = fs.readFileSync('test/fixtures/images.md').toString();
-      const actual = markdownToBlocks(text, {strictImageUrls: false});
+      const actual = markdownToBlocks(text, { strictImageUrls: false });
 
       const expected = [
         notion.headingOne([notion.richText('Images')]),
@@ -202,22 +203,77 @@ const hello = "hello";
       expect(actual).toStrictEqual(expected);
     });
 
-    it('should parse math', () => {
-      const text = fs.readFileSync('test/fixtures/math.md').toString();
-      const actual = markdownToBlocks(text);
+    it('should parse math when enableMath is true', () => {
+      // Normalize line endings to \n for cross-platform compatibility
+      const text = fs
+        .readFileSync('test/fixtures/math.md')
+        .toString()
+        .replace(/\r\n/g, '\n');
+      // Fix Issue #48: Math parsing is now opt-in to avoid $dollar sign issues
+      const actual = markdownToBlocks(text, { enableMath: true });
 
       const expected = [
         notion.paragraph([
           notion.richText('Lift('),
-          notion.richText('L', {type: 'equation'}),
+          notion.richText('L', { type: 'equation' }),
           notion.richText(') can be determined by Lift Coefficient ('),
-          notion.richText('C_L', {type: 'equation'}),
+          notion.richText('C_L', { type: 'equation' }),
           notion.richText(') like the following\nequation.'),
         ]),
         notion.equation('L = \\frac{1}{2} \\rho v^2 S C_L\\\\\ntest'),
       ];
 
       expect(actual).toStrictEqual(expected);
+    });
+
+    // Bug Fix Tests
+    it('should NOT parse dollar signs as equations when enableMath is false (Issue #48)', () => {
+      const text = 'A painting sold for $9M. Another sold for $5M.';
+      const actual = markdownToBlocks(text); // enableMath defaults to false
+
+      const expected = [
+        notion.paragraph([
+          notion.richText('A painting sold for $9M. Another sold for $5M.'),
+        ]),
+      ];
+
+      expect(actual).toStrictEqual(expected);
+    });
+
+    it('should pad table rows with empty cells when rows have fewer cells (Issue #71)', () => {
+      const text = `| Col1 | Col2 | Col3 |
+|------|------|------|
+| A | B |`;
+
+      const actual = markdownToBlocks(text);
+
+      // The second row should be padded to have 3 cells
+      expect(actual).toHaveLength(1);
+      expect(actual[0].type).toBe('table');
+      if (actual[0].type === 'table') {
+        const tableRows = actual[0].table.children;
+        expect(tableRows).toHaveLength(2);
+        // Second row should have 3 cells (padded with empty)
+        expect(tableRows[1].table_row.cells).toHaveLength(3);
+        expect(tableRows[1].table_row.cells[2]).toEqual([notion.richText('')]);
+      }
+    });
+
+    it('should extract blockquote text from first paragraph (Issue #70)', () => {
+      const text = '> This is a quote';
+      const actual = markdownToBlocks(text);
+
+      expect(actual).toHaveLength(1);
+      expect(actual[0].type).toBe('quote');
+      if (actual[0].type === 'quote') {
+        // Should have non-empty rich_text
+        expect(actual[0].quote.rich_text).toHaveLength(1);
+        expect(actual[0].quote.rich_text[0]).toEqual(
+          expect.objectContaining({
+            text: expect.objectContaining({ content: 'This is a quote' }),
+          }),
+        );
+      }
     });
 
     it('should split paragraphs on hard line breaks', () => {
@@ -229,9 +285,9 @@ const hello = "hello";
       const expected = [
         notion.paragraph([
           notion.richText('You can '),
-          notion.richText('italicize', {annotations: {italic: true}}),
+          notion.richText('italicize', { annotations: { italic: true } }),
           notion.richText(' or '),
-          notion.richText('bold', {annotations: {bold: true}}),
+          notion.richText('bold', { annotations: { bold: true } }),
           notion.richText(' text.'),
         ]),
         notion.paragraph([
@@ -253,7 +309,7 @@ const hello = "hello";
       const expected = [
         notion.richText('hello '),
         notion.richText('url', {
-          annotations: {italic: true},
+          annotations: { italic: true },
           url: 'https://example.com',
         }),
       ];
@@ -290,7 +346,7 @@ const hello = "hello";
 
       const actual = {
         default: markdownToRichText(text),
-        explicit: markdownToRichText(text, {notionLimits: {truncate: true}}),
+        explicit: markdownToRichText(text, { notionLimits: { truncate: true } }),
       };
 
       expect(actual.default.length).toBe(LIMITS.RICH_TEXT_ARRAYS);
@@ -303,7 +359,7 @@ const hello = "hello";
         .join('');
 
       const actual = markdownToRichText(text, {
-        notionLimits: {truncate: false},
+        notionLimits: { truncate: false },
       });
 
       expect(actual.length).toBeGreaterThan(LIMITS.RICH_TEXT_ARRAYS);
@@ -316,7 +372,7 @@ const hello = "hello";
       const spy = vi.fn();
 
       markdownToRichText(text, {
-        notionLimits: {onError: spy},
+        notionLimits: { onError: spy },
       });
 
       expect(spy).toHaveBeenCalledTimes(1);
@@ -339,7 +395,7 @@ const hello = "hello";
     it("should ignore unsupported elements when nonInline = 'ignore'", () => {
       const text = '# Header first\nOther text';
 
-      const actual = markdownToRichText(text, {nonInline: 'ignore'});
+      const actual = markdownToRichText(text, { nonInline: 'ignore' });
 
       const expected = [notion.richText('Other text')];
 
@@ -349,9 +405,9 @@ const hello = "hello";
     it("should throw when there's an unsupported element and nonInline = 'throw'", () => {
       const text = '# Header first\nOther text';
 
-      expect(() => markdownToRichText(text, {nonInline: 'throw'})).toThrow();
+      expect(() => markdownToRichText(text, { nonInline: 'throw' })).toThrow();
       expect(() =>
-        markdownToRichText(text, {nonInline: 'ignore'}),
+        markdownToRichText(text, { nonInline: 'ignore' }),
       ).not.toThrow();
     });
   });
